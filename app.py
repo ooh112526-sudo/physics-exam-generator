@@ -10,49 +10,69 @@ import re
 st.set_page_config(page_title="物理題庫系統 (Physics Exam Generator)", layout="wide", page_icon="🧲")
 
 # ==========================================
+# 常數定義：章節與單元資料
+# ==========================================
+
+SOURCES = ["一般試題", "學測題", "北模", "全模", "中模"]
+
+PHYSICS_CHAPTERS = {
+    "第一章.科學的態度與方法": [
+        "1-1 科學的態度", "1-2 科學的方法", "1-3 國際單位制", "1-4 物理學簡介"
+    ],
+    "第二章.物體的運動": [
+        "2-1 物體的運動", "2-2 牛頓三大運動定律", "2-3 生活中常見的力", "2-4 天體運動"
+    ],
+    "第三章. 物質的組成與交互作用": [
+        "3-1 物質的組成", "3-2 原子的結構", "3-3 基本交互作用"
+    ],
+    "第四章.電與磁的統一": [
+        "4-1 電流磁效應", "4-2 電磁感應", "4-3 電與磁的整合", "4-4 光波的特性", "4-5 都卜勒效應"
+    ],
+    "第五章. 能　量": [
+        "5-1 能量的形式", "5-2 微觀尺度下的能量", "5-3 能量守恆", "5-4 質能互換"
+    ],
+    "第六章.量子現象": [
+        "6-1 量子論的誕生", "6-2 光的粒子性", "6-3 物質的波動性", "6-4 波粒二象性", "6-5 原子光譜"
+    ]
+}
+
+# ==========================================
 # 核心邏輯類別與函式
 # ==========================================
 
 class Question:
-    def __init__(self, q_type, content, options=None, answer=None, original_id=0, image_data=None, category="未分類"):
+    def __init__(self, q_type, content, options=None, answer=None, original_id=0, image_data=None, 
+                 source="一般試題", chapter="", unit=""):
         self.id = original_id
         self.type = q_type  # 'Single', 'Multi', 'Fill'
-        self.category = category  # e.g., '力學', '電磁學'
+        self.source = source
+        self.chapter = chapter
+        self.unit = unit
         self.content = content
-        self.options = options if options else []  # list of strings
-        self.answer = answer  # 'A', 'ABC', or text for fill-in
-        self.image_data = image_data  # BytesIO or bytes object
+        self.options = options if options else []
+        self.answer = answer
+        self.image_data = image_data
 
 def extract_images_from_paragraph(paragraph, doc_part):
-    """
-    從 Word 段落中擷取圖片 (Blob data)
-    這是比較進階的寫法，直接從 XML 尋找關聯的圖片 ID
-    """
+    """從 Word 段落中擷取圖片"""
     images = []
-    # XML Namespace map
     nsmap = {
         'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
         'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
     }
-    
-    # 尋找所有 blip 元素 (圖片參照點)
-    # paragraph._element 是 lxml 的 element
     blips = paragraph._element.findall('.//a:blip', namespaces=nsmap)
-    
     for blip in blips:
-        # 取得 rId (Relationship ID)
         embed_attr = blip.get(f"{{{nsmap['r']}}}embed")
         if embed_attr and embed_attr in doc_part.rels:
             part = doc_part.rels[embed_attr].target_part
-            # 確認是圖片 Part
             if "image" in part.content_type:
                 images.append(part.blob)
     return images
 
 def parse_docx(file_bytes):
-    """解析上傳的 Word 檔案 (含圖片擷取與分類解析)"""
+    """解析 Word 檔案 (支援 Source, Chapter, Unit 標籤)"""
     doc = docx.Document(io.BytesIO(file_bytes))
-    doc_part = doc.part # 取得 Document Part 以存取 Relationships
+    doc_part = doc.part
     
     questions = []
     current_q = None
@@ -60,26 +80,44 @@ def parse_docx(file_bytes):
     opt_pattern = re.compile(r'^\s*\(?[A-Ea-e]\)?\s*[.、]?\s*')
     q_id_counter = 1
 
-    # 預設分類
-    current_cat = "未分類"
+    # 預設狀態 (會延續到下一題)
+    curr_src = "一般試題"
+    curr_chap = ""
+    curr_unit = ""
 
     for para in doc.paragraphs:
         text = para.text.strip()
-        
-        # 嘗試從該段落擷取圖片
         found_images = extract_images_from_paragraph(para, doc_part)
         
-        # 0. 偵測分類標籤 [Cat:力學]
+        # 0. 偵測分類標籤
+        if text.startswith('[Src:'):
+            curr_src = text.split(':')[1].replace(']', '').strip()
+            continue
+        if text.startswith('[Chap:'):
+            curr_chap = text.split(':')[1].replace(']', '').strip()
+            continue
+        if text.startswith('[Unit:'):
+            curr_unit = text.split(':')[1].replace(']', '').strip()
+            continue
+        # 相容舊版 [Cat:] 標籤 (視為章節或單元)
         if text.startswith('[Cat:'):
-            current_cat = text.split(':')[1].replace(']', '').strip()
+            curr_unit = text.split(':')[1].replace(']', '').strip()
             continue
 
         # 1. 偵測新題目
         if text.startswith('[Type:'):
             if current_q: questions.append(current_q)
             q_type_str = text.split(':')[1].replace(']', '').strip()
-            # 建立新題目時帶入目前的分類
-            current_q = Question(q_type=q_type_str, content="", options=[], answer="", original_id=q_id_counter, category=current_cat)
+            current_q = Question(
+                q_type=q_type_str, 
+                content="", 
+                options=[], 
+                answer="", 
+                original_id=q_id_counter, 
+                source=curr_src,
+                chapter=curr_chap,
+                unit=curr_unit
+            )
             q_id_counter += 1
             state = None
             continue
@@ -94,14 +132,12 @@ def parse_docx(file_bytes):
             if remain_text and current_q: current_q.answer = remain_text
             state = 'Ans'; continue
 
-        # 3. 填入內容與圖片
+        # 3. 填入內容
         if current_q:
-            # 如果這段落有圖片，且目前是題目區塊，則加入圖片
-            # (目前簡化邏輯：一題只存一張主要圖片，若有多張會覆蓋，可視需求調整)
             if found_images and state == 'Q':
                 current_q.image_data = found_images[0]
 
-            if not text: continue # 忽略純空行(但前面有檢查圖片，所以圖片行如果是空的文字也會被處理)
+            if not text: continue
 
             if state == 'Q': current_q.content += text + "\n"
             elif state == 'Opt':
@@ -113,7 +149,7 @@ def parse_docx(file_bytes):
     return questions
 
 def shuffle_options_and_update_answer(question):
-    """核心演算法：打亂選項並修正答案索引"""
+    """打亂選項並修正答案"""
     if question.type == 'Fill': return question
 
     original_opts = question.options
@@ -140,12 +176,14 @@ def shuffle_options_and_update_answer(question):
     new_ans_chars.sort()
     new_answer_str = "".join(new_ans_chars)
 
-    # 包含 image_data 和 category 一起複製
-    new_q = Question(question.type, question.content, new_options, new_answer_str, question.id, question.image_data, question.category)
-    return new_q
+    return Question(
+        question.type, question.content, new_options, new_answer_str, 
+        question.id, question.image_data, 
+        question.source, question.chapter, question.unit
+    )
 
 def generate_word_files(selected_questions, shuffle=True):
-    """生成 Word 試卷與詳解 (含圖片)"""
+    """生成 Word 試卷"""
     exam_doc = docx.Document()
     ans_doc = docx.Document()
     
@@ -165,16 +203,12 @@ def generate_word_files(selected_questions, shuffle=True):
         # --- 試題卷 ---
         p = exam_doc.add_paragraph()
         q_type_text = {'Single': '單選', 'Multi': '多選', 'Fill': '填充'}.get(q.type, '未知')
-        # 顯示題目 (不一定顯示分類在考卷上，但可選擇加註)
         runner = p.add_run(f"{idx}. ({q_type_text}) {processed_q.content.strip()}")
         runner.bold = True
         
-        # 插入圖片 (如果有)
         if processed_q.image_data:
             try:
-                # 需將 bytes 轉為 stream
                 img_stream = io.BytesIO(processed_q.image_data)
-                # 預設寬度 3 英吋，可自行調整
                 exam_doc.add_picture(img_stream, width=Inches(3.0))
             except Exception as e:
                 print(f"Error adding picture: {e}")
@@ -190,8 +224,15 @@ def generate_word_files(selected_questions, shuffle=True):
         ans_p = ans_doc.add_paragraph()
         ans_p.add_run(f"{idx}. ").bold = True
         ans_p.add_run(f"{processed_q.answer}")
-        # 在答案卷備註分類方便老師參考
-        ans_p.add_run(f"  [{processed_q.category}]").italic = True
+        
+        # 在詳解卷顯示完整分類資訊
+        meta_info = []
+        if processed_q.source and processed_q.source != "一般試題": meta_info.append(processed_q.source)
+        if processed_q.unit: meta_info.append(processed_q.unit)
+        elif processed_q.chapter: meta_info.append(processed_q.chapter)
+            
+        if meta_info:
+            ans_p.add_run(f"  [{' / '.join(meta_info)}]").italic = True
 
     exam_io = io.BytesIO()
     ans_io = io.BytesIO()
@@ -211,8 +252,8 @@ if 'question_pool' not in st.session_state:
 # Streamlit 介面
 # ==========================================
 
-st.title("🧲 物理題庫自動組卷系統 v2.6 (含分類功能)")
-st.markdown("支援 **手動輸入**、**Word 匯入**、**圖片支援** 與 **題目分類**。")
+st.title("🧲 物理題庫自動組卷系統 v2.7")
+st.markdown("支援 **完整章節分類**、**學測/模考來源標記** 與 **圖片功能**。")
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -226,16 +267,23 @@ with st.sidebar:
             st.rerun()
     
     st.divider()
-    st.info("💡 提示：Word 匯入時，可使用 `[Cat:分類名稱]` 來指定分類。手動輸入時可直接選擇。")
+    st.markdown("""
+    **Word 匯入標籤說明：**
+    - `[Src:學測題]` 來源
+    - `[Chap:第一章...]` 章節
+    - `[Unit:1-1...]` 單元
+    - `[Type:Single]` 題型
+    """)
     
-    # 範本下載 (簡單文字版，圖片建議手動測試)
     sample_doc = docx.Document()
-    sample_doc.add_paragraph("[Cat:波動與光學]")
-    sample_doc.add_paragraph("[Type:Single]\n[Q]\n(範例) 下圖為波動示意圖...\n[Opt]\n(A)變大\n(B)變小\n[Ans] A")
+    sample_doc.add_paragraph("[Src:北模]")
+    sample_doc.add_paragraph("[Chap:第四章.電與磁的統一]")
+    sample_doc.add_paragraph("[Unit:4-1 電流磁效應]")
+    sample_doc.add_paragraph("[Type:Single]\n[Q]\n(範例) 下列關於安培右手定則...\n[Opt]\n(A)選項一\n(B)選項二\n[Ans] A")
     sample_io = io.BytesIO()
     sample_doc.save(sample_io)
     sample_io.seek(0)
-    st.download_button("📥 下載 Word 範本 (含分類)", sample_io, "template.docx")
+    st.download_button("📥 下載 Word 範本", sample_io, "template.docx")
 
 # --- 主畫面 ---
 tab1, tab2, tab3 = st.tabs(["✍️ 手動新增題目", "📁 從 Word 匯入", "🚀 選題與匯出"])
@@ -244,24 +292,32 @@ tab1, tab2, tab3 = st.tabs(["✍️ 手動新增題目", "📁 從 Word 匯入",
 with tab1:
     st.subheader("新增單一題目")
     
-    c1, c2, c3 = st.columns([1, 1, 2])
+    # 第一列：分類設定
+    col_cat1, col_cat2, col_cat3 = st.columns(3)
+    with col_cat1:
+        new_q_source = st.selectbox("來源", SOURCES)
+    with col_cat2:
+        # 章節選單
+        chap_list = list(PHYSICS_CHAPTERS.keys())
+        new_q_chap = st.selectbox("章節", chap_list)
+    with col_cat3:
+        # 根據章節動態產生單元選單
+        unit_list = PHYSICS_CHAPTERS[new_q_chap]
+        new_q_unit = st.selectbox("單元", unit_list)
+
+    # 第二列：題型與答案
+    c1, c2 = st.columns([1, 3])
     with c1:
         new_q_type = st.selectbox("題型", ["Single", "Multi", "Fill"], format_func=lambda x: {'Single':'單選題', 'Multi':'多選題', 'Fill':'填充題'}[x])
     with c2:
-        # 新增分類選項
-        categories = ["力學", "熱學", "波動與光學", "電磁學", "近代物理", "其他"]
-        new_q_cat = st.selectbox("題目分類", categories)
-    with c3:
         new_q_ans = st.text_input("正確答案", placeholder="選擇題填代號(如 A)，填充題填文字")
 
     new_q_content = st.text_area("題目內容", height=100, placeholder="請輸入題目敘述...")
-    
-    # 圖片上傳區
-    new_q_image = st.file_uploader("上傳圖片 (選用)", type=['png', 'jpg', 'jpeg'], help="若題目包含電路圖或示意圖請在此上傳")
+    new_q_image = st.file_uploader("上傳圖片 (選用)", type=['png', 'jpg', 'jpeg'])
     
     new_q_options = []
     if new_q_type in ["Single", "Multi"]:
-        opts_text = st.text_area("選項 (每一行一個選項)", height=150, placeholder="1.5 倍\n0.67 倍\n2.25 倍\n不變")
+        opts_text = st.text_area("選項 (每一行一個選項)", height=150, placeholder="選項 A\n選項 B\n選項 C\n選項 D")
         if opts_text:
             new_q_options = [line.strip() for line in opts_text.split('\n') if line.strip()]
 
@@ -272,20 +328,22 @@ with tab1:
             st.error("選擇題必須提供選項")
         else:
             q_id = len(st.session_state['question_pool']) + 1
-            
-            # 處理圖片
-            img_bytes = None
-            if new_q_image is not None:
-                img_bytes = new_q_image.getvalue()
+            img_bytes = new_q_image.getvalue() if new_q_image else None
 
-            new_q = Question(new_q_type, new_q_content, new_q_options, new_q_ans, q_id, image_data=img_bytes, category=new_q_cat)
+            new_q = Question(
+                new_q_type, new_q_content, new_q_options, new_q_ans, q_id, 
+                image_data=img_bytes, 
+                source=new_q_source, 
+                chapter=new_q_chap, 
+                unit=new_q_unit
+            )
             st.session_state['question_pool'].append(new_q)
-            st.success(f"已加入題目 ({new_q_cat})！")
+            st.success(f"已加入題目！分類：{new_q_source} / {new_q_unit}")
 
 # === Tab 2: Word 匯入 ===
 with tab2:
     st.subheader("批次匯入題目")
-    st.write("請依照範本格式準備 Word 檔。可使用 `[Cat:分類名稱]` 標籤來指定後續題目的分類。")
+    st.write("支援標籤：`[Src:來源]`, `[Chap:章節]`, `[Unit:單元]`。")
     uploaded_file = st.file_uploader("上傳 Word (.docx) 檔案", type=['docx'])
     
     if uploaded_file:
@@ -296,7 +354,7 @@ with tab2:
                     st.session_state['question_pool'].extend(imported_qs)
                     st.success(f"成功匯入 {len(imported_qs)} 題！")
                 else:
-                    st.warning("未偵測到題目，請檢查格式標籤。")
+                    st.warning("未偵測到題目。")
             except Exception as e:
                 st.error(f"解析失敗：{e}")
 
@@ -323,29 +381,23 @@ with tab3:
             
             with col_text:
                 type_badge = {'Single': '🟢單選', 'Multi': '🔵多選', 'Fill': '🟠填充'}.get(q.type)
-                # 在標題顯示分類
-                with st.expander(f"{i+1}. [{q.category}] {type_badge} {q.content.splitlines()[0][:40]}..."):
-                    st.markdown(f"**分類**：{q.category}")
+                # 顯示詳細分類標籤
+                tags = f"[{q.source}] {q.unit}"
+                with st.expander(f"{i+1}. {tags} {type_badge} {q.content.splitlines()[0][:30]}..."):
+                    st.caption(f"完整分類：{q.chapter} > {q.unit}")
                     st.markdown(f"**題目**：\n{q.content}")
-                    
-                    # 預覽圖片
                     if q.image_data:
                         st.image(q.image_data, caption="題目附圖", width=300)
-                        
                     if q.options:
-                        st.markdown("**選項**：")
                         for idx, opt in enumerate(q.options):
                             st.text(f"({chr(65+idx)}) {opt}")
                     st.markdown(f"**答案**：`{q.answer}`")
-                    
-                    if st.button("🗑️ 刪除此題", key=f"del_{i}"):
+                    if st.button("🗑️ 刪除", key=f"del_{i}"):
                         st.session_state['question_pool'].pop(i)
                         st.rerun()
 
         st.divider()
-        st.subheader("匯出設定")
         st.write(f"已選擇: **{len(selected_indices)}** 題")
-        
         do_shuffle = st.checkbox("啟用選項亂數重排", value=True)
         
         if st.button("🚀 生成 Word 試卷", type="primary", disabled=len(selected_indices)==0):
