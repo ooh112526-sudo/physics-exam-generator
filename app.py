@@ -14,9 +14,10 @@ st.set_page_config(page_title="物理題庫系統 (Physics Exam Generator)", lay
 # ==========================================
 
 class Question:
-    def __init__(self, q_type, content, options=None, answer=None, original_id=0, image_data=None):
+    def __init__(self, q_type, content, options=None, answer=None, original_id=0, image_data=None, category="未分類"):
         self.id = original_id
         self.type = q_type  # 'Single', 'Multi', 'Fill'
+        self.category = category  # e.g., '力學', '電磁學'
         self.content = content
         self.options = options if options else []  # list of strings
         self.answer = answer  # 'A', 'ABC', or text for fill-in
@@ -49,7 +50,7 @@ def extract_images_from_paragraph(paragraph, doc_part):
     return images
 
 def parse_docx(file_bytes):
-    """解析上傳的 Word 檔案 (含圖片擷取)"""
+    """解析上傳的 Word 檔案 (含圖片擷取與分類解析)"""
     doc = docx.Document(io.BytesIO(file_bytes))
     doc_part = doc.part # 取得 Document Part 以存取 Relationships
     
@@ -59,17 +60,26 @@ def parse_docx(file_bytes):
     opt_pattern = re.compile(r'^\s*\(?[A-Ea-e]\)?\s*[.、]?\s*')
     q_id_counter = 1
 
+    # 預設分類
+    current_cat = "未分類"
+
     for para in doc.paragraphs:
         text = para.text.strip()
         
         # 嘗試從該段落擷取圖片
         found_images = extract_images_from_paragraph(para, doc_part)
         
+        # 0. 偵測分類標籤 [Cat:力學]
+        if text.startswith('[Cat:'):
+            current_cat = text.split(':')[1].replace(']', '').strip()
+            continue
+
         # 1. 偵測新題目
         if text.startswith('[Type:'):
             if current_q: questions.append(current_q)
             q_type_str = text.split(':')[1].replace(']', '').strip()
-            current_q = Question(q_type=q_type_str, content="", options=[], answer="", original_id=q_id_counter)
+            # 建立新題目時帶入目前的分類
+            current_q = Question(q_type=q_type_str, content="", options=[], answer="", original_id=q_id_counter, category=current_cat)
             q_id_counter += 1
             state = None
             continue
@@ -130,8 +140,8 @@ def shuffle_options_and_update_answer(question):
     new_ans_chars.sort()
     new_answer_str = "".join(new_ans_chars)
 
-    # 包含 image_data 一起複製
-    new_q = Question(question.type, question.content, new_options, new_answer_str, question.id, question.image_data)
+    # 包含 image_data 和 category 一起複製
+    new_q = Question(question.type, question.content, new_options, new_answer_str, question.id, question.image_data, question.category)
     return new_q
 
 def generate_word_files(selected_questions, shuffle=True):
@@ -155,6 +165,7 @@ def generate_word_files(selected_questions, shuffle=True):
         # --- 試題卷 ---
         p = exam_doc.add_paragraph()
         q_type_text = {'Single': '單選', 'Multi': '多選', 'Fill': '填充'}.get(q.type, '未知')
+        # 顯示題目 (不一定顯示分類在考卷上，但可選擇加註)
         runner = p.add_run(f"{idx}. ({q_type_text}) {processed_q.content.strip()}")
         runner.bold = True
         
@@ -179,6 +190,8 @@ def generate_word_files(selected_questions, shuffle=True):
         ans_p = ans_doc.add_paragraph()
         ans_p.add_run(f"{idx}. ").bold = True
         ans_p.add_run(f"{processed_q.answer}")
+        # 在答案卷備註分類方便老師參考
+        ans_p.add_run(f"  [{processed_q.category}]").italic = True
 
     exam_io = io.BytesIO()
     ans_io = io.BytesIO()
@@ -198,8 +211,8 @@ if 'question_pool' not in st.session_state:
 # Streamlit 介面
 # ==========================================
 
-st.title("🧲 物理題庫自動組卷系統 v2.5 (含圖片支援)")
-st.markdown("支援 **手動輸入(含圖片)** 與 **Word 匯入(自動抓圖)** 混合出題模式。")
+st.title("🧲 物理題庫自動組卷系統 v2.6 (含分類功能)")
+st.markdown("支援 **手動輸入**、**Word 匯入**、**圖片支援** 與 **題目分類**。")
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -213,15 +226,16 @@ with st.sidebar:
             st.rerun()
     
     st.divider()
-    st.info("💡 提示：Word 匯入時，程式會嘗試抓取 `[Q]` 區塊內的圖片。手動輸入時可直接上傳圖片檔。")
+    st.info("💡 提示：Word 匯入時，可使用 `[Cat:分類名稱]` 來指定分類。手動輸入時可直接選擇。")
     
     # 範本下載 (簡單文字版，圖片建議手動測試)
     sample_doc = docx.Document()
-    sample_doc.add_paragraph("[Type:Single]\n[Q]\n(範例) 下圖為波動示意圖...\n(請在此插入圖片)\n[Opt]\n(A)變大\n(B)變小\n[Ans] A")
+    sample_doc.add_paragraph("[Cat:波動與光學]")
+    sample_doc.add_paragraph("[Type:Single]\n[Q]\n(範例) 下圖為波動示意圖...\n[Opt]\n(A)變大\n(B)變小\n[Ans] A")
     sample_io = io.BytesIO()
     sample_doc.save(sample_io)
     sample_io.seek(0)
-    st.download_button("📥 下載 Word 範本", sample_io, "template.docx")
+    st.download_button("📥 下載 Word 範本 (含分類)", sample_io, "template.docx")
 
 # --- 主畫面 ---
 tab1, tab2, tab3 = st.tabs(["✍️ 手動新增題目", "📁 從 Word 匯入", "🚀 選題與匯出"])
@@ -230,11 +244,15 @@ tab1, tab2, tab3 = st.tabs(["✍️ 手動新增題目", "📁 從 Word 匯入",
 with tab1:
     st.subheader("新增單一題目")
     
-    c1, c2 = st.columns([1, 3])
+    c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
         new_q_type = st.selectbox("題型", ["Single", "Multi", "Fill"], format_func=lambda x: {'Single':'單選題', 'Multi':'多選題', 'Fill':'填充題'}[x])
     with c2:
-        new_q_ans = st.text_input("正確答案", placeholder="選擇題填代號(如 A, AC)，填充題填文字")
+        # 新增分類選項
+        categories = ["力學", "熱學", "波動與光學", "電磁學", "近代物理", "其他"]
+        new_q_cat = st.selectbox("題目分類", categories)
+    with c3:
+        new_q_ans = st.text_input("正確答案", placeholder="選擇題填代號(如 A)，填充題填文字")
 
     new_q_content = st.text_area("題目內容", height=100, placeholder="請輸入題目敘述...")
     
@@ -260,14 +278,14 @@ with tab1:
             if new_q_image is not None:
                 img_bytes = new_q_image.getvalue()
 
-            new_q = Question(new_q_type, new_q_content, new_q_options, new_q_ans, q_id, image_data=img_bytes)
+            new_q = Question(new_q_type, new_q_content, new_q_options, new_q_ans, q_id, image_data=img_bytes, category=new_q_cat)
             st.session_state['question_pool'].append(new_q)
-            st.success("題目(含圖片)已加入！")
+            st.success(f"已加入題目 ({new_q_cat})！")
 
 # === Tab 2: Word 匯入 ===
 with tab2:
     st.subheader("批次匯入題目")
-    st.write("請依照範本格式準備 Word 檔。若題目段落中有插入圖片，系統會嘗試自動擷取。")
+    st.write("請依照範本格式準備 Word 檔。可使用 `[Cat:分類名稱]` 標籤來指定後續題目的分類。")
     uploaded_file = st.file_uploader("上傳 Word (.docx) 檔案", type=['docx'])
     
     if uploaded_file:
@@ -305,7 +323,9 @@ with tab3:
             
             with col_text:
                 type_badge = {'Single': '🟢單選', 'Multi': '🔵多選', 'Fill': '🟠填充'}.get(q.type)
-                with st.expander(f"{i+1}. {type_badge} {q.content.splitlines()[0][:40]}..."):
+                # 在標題顯示分類
+                with st.expander(f"{i+1}. [{q.category}] {type_badge} {q.content.splitlines()[0][:40]}..."):
+                    st.markdown(f"**分類**：{q.category}")
                     st.markdown(f"**題目**：\n{q.content}")
                     
                     # 預覽圖片
