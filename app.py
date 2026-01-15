@@ -311,8 +311,8 @@ if 'question_pool' not in st.session_state:
 # Streamlit 介面
 # ==========================================
 
-st.title("🧲 物理題庫自動組卷系統 v3.3")
-st.markdown("高中物理老師專用助理 | 支援 **LaTeX 公式**、**排版優化** 與 **線上題目編輯**。")
+st.title("🧲 物理題庫自動組卷系統 v3.5")
+st.markdown("高中物理老師專用助理 | 支援 **LaTeX 公式**、**排版優化**、**線上編輯** 與 **分層篩選**。")
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -432,18 +432,60 @@ with tab3:
     else:
         # 過濾器區域
         st.markdown("### 🔍 篩選題目")
-        f_col1, f_col2 = st.columns(2)
-        with f_col1:
-            filter_chap = st.multiselect("篩選章節", list(PHYSICS_CHAPTERS.keys()))
-        with f_col2:
-            filter_src = st.multiselect("篩選來源", SOURCES)
+        
+        # 1. 來源篩選
+        filter_src = st.multiselect("篩選來源", SOURCES)
+        
+        # 2. 章節與單元篩選 (分層勾選模式)
+        st.write("#### 選擇章節與單元")
+        st.caption("點擊章節展開勾選細項，若未勾選任何項目則預設顯示全部。")
+        
+        selected_units = set()
+        selected_chapters = set()
+        
+        # 使用 Columns 排版讓畫面不要太長
+        # 將章節分兩欄顯示
+        chap_keys = list(PHYSICS_CHAPTERS.keys())
+        col_c1, col_c2 = st.columns(2)
+        
+        for i, (chap, units) in enumerate(PHYSICS_CHAPTERS.items()):
+            target_col = col_c1 if i % 2 == 0 else col_c2
+            with target_col.expander(f"📂 {chap}", expanded=False):
+                # 全選該章節的功能
+                c_all_key = f"all_{chap}"
+                is_chap_all = st.checkbox(f"全選整個 {chap.split('.')[0]}", key=c_all_key)
+                
+                if is_chap_all:
+                    selected_chapters.add(chap)
+                
+                st.markdown("---")
+                # 單元列表
+                for unit in units:
+                    u_key = f"chk_{chap}_{unit}"
+                    is_unit_checked = st.checkbox(unit, key=u_key)
+                    
+                    if is_chap_all or is_unit_checked:
+                        selected_units.add(unit)
 
+        # 3. 執行篩選
         display_pool = []
+        has_unit_filter = (len(selected_units) > 0) or (len(selected_chapters) > 0)
+        has_src_filter = (len(filter_src) > 0)
+
         for i, q in enumerate(st.session_state['question_pool']):
-            chap_match = (not filter_chap) or (q.chapter in filter_chap)
-            src_match = (not filter_src) or (q.source in filter_src)
+            # 來源篩選
+            src_match = (not has_src_filter) or (q.source in filter_src)
             
-            if chap_match and src_match:
+            # 單元篩選
+            # 邏輯：(沒有勾選任何單元 = 全顯示) OR (題目單元在勾選名單中) OR (題目章節被全選)
+            if not has_unit_filter:
+                unit_match = True
+            else:
+                unit_in_list = q.unit in selected_units
+                chap_in_list = q.chapter in selected_chapters
+                unit_match = unit_in_list or chap_in_list
+            
+            if src_match and unit_match:
                 display_pool.append((i, q))
 
         st.write(f"符合條件：{len(display_pool)} / 總題數：{len(st.session_state['question_pool'])}")
