@@ -79,7 +79,7 @@ def extract_images_from_paragraph(paragraph, doc_part):
     return images
 
 def parse_docx(file_bytes):
-    """解析 Word 檔案 (支援 Source, Chapter, Unit 標籤)"""
+    """解析 Word 檔案 (支援 Source, Chapter, Unit 標籤，增強同一行標籤解析)"""
     try:
         doc = docx.Document(io.BytesIO(file_bytes))
         doc_part = doc.part
@@ -102,7 +102,7 @@ def parse_docx(file_bytes):
         text = para.text.strip()
         found_images = extract_images_from_paragraph(para, doc_part)
         
-        # 0. 偵測分類標籤
+        # 0. 偵測分類標籤 (Src, Chap, Unit)
         if text.startswith('[Src:'):
             curr_src = text.split(':')[1].replace(']', '').strip()
             continue
@@ -112,16 +112,23 @@ def parse_docx(file_bytes):
         if text.startswith('[Unit:'):
             curr_unit = text.split(':')[1].replace(']', '').strip()
             continue
-        
-        # 相容舊版 [Cat:] 標籤
-        if text.startswith('[Cat:'):
+        if text.startswith('[Cat:'): # 相容舊版
             curr_unit = text.split(':')[1].replace(']', '').strip()
             continue
 
-        # 1. 偵測新題目
+        # 1. 偵測新題目 [Type:...]
         if text.startswith('[Type:'):
             if current_q: questions.append(current_q)
-            q_type_str = text.split(':')[1].replace(']', '').strip()
+            
+            # 解析 Type
+            end_idx = text.find(']')
+            if end_idx != -1:
+                q_type_str = text[6:end_idx].strip()
+                remaining_text = text[end_idx+1:].strip()
+            else:
+                q_type_str = "Single"
+                remaining_text = ""
+
             current_q = Question(
                 q_type=q_type_str, 
                 content="", 
@@ -134,17 +141,29 @@ def parse_docx(file_bytes):
             )
             q_id_counter += 1
             state = None
-            continue
+            
+            if remaining_text:
+                text = remaining_text
+            else:
+                continue
 
-        # 2. 狀態切換
+        # 2. 狀態切換與單行內容處理
         if text.startswith('[Q]'):
-            state = 'Q'; continue
+            state = 'Q'
+            text = text[3:].strip()
+            if not text: continue
+
         elif text.startswith('[Opt]'):
-            state = 'Opt'; continue
+            state = 'Opt'
+            text = text[5:].strip()
+            if not text: continue
+            
         elif text.startswith('[Ans]'):
+            state = 'Ans'
             remain_text = text.replace('[Ans]', '').strip()
-            if remain_text and current_q: current_q.answer = remain_text
-            state = 'Ans'; continue
+            if remain_text and current_q: 
+                current_q.answer = remain_text
+            continue
 
         # 3. 填入內容
         if current_q:
@@ -153,11 +172,13 @@ def parse_docx(file_bytes):
 
             if not text: continue
 
-            if state == 'Q': current_q.content += text + "\n"
+            if state == 'Q': 
+                current_q.content += text + "\n"
             elif state == 'Opt':
                 clean_opt = opt_pattern.sub('', text)
                 current_q.options.append(clean_opt)
-            elif state == 'Ans': current_q.answer += text
+            elif state == 'Ans': 
+                current_q.answer += text
 
     if current_q: questions.append(current_q)
     return questions
@@ -212,23 +233,20 @@ def generate_word_files(selected_questions, shuffle=True, title="高中物理科
     set_font(ans_doc)
     
     # === 試題卷檔頭設計 ===
-    # 標題
     title_p = exam_doc.add_heading(title, 0)
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # 建立班級姓名座號表格 (1列4欄)
     table = exam_doc.add_table(rows=1, cols=4)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = True
     
-    # 設定表格內容與寬度
     cells = table.rows[0].cells
     cells[0].text = "班級："
     cells[1].text = "__________"
     cells[2].text = "姓名："
     cells[3].text = "__________"
     
-    exam_doc.add_paragraph("") # 空行分隔
+    exam_doc.add_paragraph("")
     
     # === 答案卷檔頭 ===
     ans_doc.add_heading(f'{title} - 詳解卷', 0)
@@ -244,11 +262,9 @@ def generate_word_files(selected_questions, shuffle=True, title="高中物理科
         p = exam_doc.add_paragraph()
         q_type_text = {'Single': '單選', 'Multi': '多選', 'Fill': '填充'}.get(q.type, '未知')
         
-        # 題目文字
         runner = p.add_run(f"{idx}. ({q_type_text}) {processed_q.content.strip()}")
         runner.bold = True
         
-        # 圖片處理
         if processed_q.image_data:
             try:
                 img_stream = io.BytesIO(processed_q.image_data)
@@ -256,14 +272,12 @@ def generate_word_files(selected_questions, shuffle=True, title="高中物理科
             except Exception as e:
                 print(f"Error adding picture: {e}")
 
-        # 選項處理
         if q.type != 'Fill':
             for i, opt in enumerate(processed_q.options):
                 exam_doc.add_paragraph(f"({chr(65+i)}) {opt}")
         else:
             exam_doc.add_paragraph("______________________")
         
-        # 題間距
         exam_doc.add_paragraph("") 
         
         # --- 答案卷 ---
@@ -271,7 +285,6 @@ def generate_word_files(selected_questions, shuffle=True, title="高中物理科
         ans_p.add_run(f"{idx}. ").bold = True
         ans_p.add_run(f"{processed_q.answer}")
         
-        # 詳解卷資訊
         meta_info = []
         if processed_q.source and processed_q.source != "一般試題": meta_info.append(processed_q.source)
         if processed_q.unit: meta_info.append(processed_q.unit)
@@ -298,8 +311,8 @@ if 'question_pool' not in st.session_state:
 # Streamlit 介面
 # ==========================================
 
-st.title("🧲 物理題庫自動組卷系統 v3.1")
-st.markdown("高中物理老師專用助理 | 支援 **LaTeX 公式預覽** 與 **優化排版**。")
+st.title("🧲 物理題庫自動組卷系統 v3.3")
+st.markdown("高中物理老師專用助理 | 支援 **LaTeX 公式**、**排版優化** 與 **線上題目編輯**。")
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -324,7 +337,6 @@ with st.sidebar:
     - `[Ans] A` 答案
     """)
     
-    # 產生範本供下載
     if st.button("📥 下載 Word 匯入範本"):
         sample_doc = docx.Document()
         sample_doc.add_paragraph("[Src:北模]")
@@ -344,20 +356,16 @@ with tab1:
     st.subheader("新增單一題目")
     st.caption("提示：在題目內容中使用 `$F=ma$` 語法可顯示數學公式。")
     
-    # 第一列：分類設定
     col_cat1, col_cat2, col_cat3 = st.columns(3)
     with col_cat1:
         new_q_source = st.selectbox("來源", SOURCES)
     with col_cat2:
-        # 章節選單
         chap_list = list(PHYSICS_CHAPTERS.keys())
         new_q_chap = st.selectbox("章節", chap_list)
     with col_cat3:
-        # 根據章節動態產生單元選單
         unit_list = PHYSICS_CHAPTERS[new_q_chap]
         new_q_unit = st.selectbox("單元", unit_list)
 
-    # 第二列：題型與答案
     c1, c2 = st.columns([1, 3])
     with c1:
         new_q_type = st.selectbox("題型", ["Single", "Multi", "Fill"], format_func=lambda x: {'Single':'單選題', 'Multi':'多選題', 'Fill':'填充題'}[x])
@@ -366,7 +374,6 @@ with tab1:
 
     new_q_content = st.text_area("題目內容 (支援 LaTeX)", height=100, placeholder="例如：求物體受力 $F = G \frac{Mm}{r^2}$ 的大小...")
     
-    # 即時預覽 LaTeX
     if "$" in new_q_content:
         st.markdown("**預覽效果：**")
         st.markdown(new_q_content)
@@ -431,10 +438,8 @@ with tab3:
         with f_col2:
             filter_src = st.multiselect("篩選來源", SOURCES)
 
-        # 根據過濾條件顯示題目
         display_pool = []
         for i, q in enumerate(st.session_state['question_pool']):
-            # 邏輯：若未選篩選條件則全過，否則需符合條件
             chap_match = (not filter_chap) or (q.chapter in filter_chap)
             src_match = (not filter_src) or (q.source in filter_src)
             
@@ -462,21 +467,75 @@ with tab3:
             with col_text:
                 type_badge = {'Single': '🟢單選', 'Multi': '🔵多選', 'Fill': '🟠填充'}.get(q.type, '⚪未知')
                 tags = f"[{q.source}] {q.unit}"
+                preview_content = q.content.strip()
+                preview_title = preview_content.splitlines()[0][:20] if preview_content else "(無內容)"
                 
-                # 預覽區塊
-                with st.expander(f"{original_idx+1}. {tags} | {type_badge} | {q.content.splitlines()[0][:20]}..."):
-                    st.caption(f"分類：{q.chapter} > {q.unit}")
+                with st.expander(f"{original_idx+1}. {tags} | {type_badge} | {preview_title}..."):
+                    # === 編輯模式切換 ===
+                    is_editing = st.checkbox(f"✏️ 編輯模式", key=f"edit_{original_idx}")
                     
-                    # 支援 LaTeX 顯示
-                    st.markdown("**題目**：")
-                    st.markdown(q.content)
-                    
-                    if q.image_data:
-                        st.image(q.image_data, caption="題目附圖", width=300)
-                    if q.options:
-                        for idx, opt in enumerate(q.options):
-                            st.text(f"({chr(65+idx)}) {opt}")
-                    st.markdown(f"**答案**：`{q.answer}`")
+                    if is_editing:
+                        # 顯示編輯表單
+                        with st.container(border=True):
+                            st.caption("編輯題目屬性")
+                            # 第一列：分類標籤
+                            ec1, ec2, ec3 = st.columns(3)
+                            
+                            # 來源
+                            try:
+                                src_idx = SOURCES.index(q.source)
+                            except ValueError:
+                                src_idx = 0
+                            new_src = ec1.selectbox("來源", SOURCES, index=src_idx, key=f"e_src_{original_idx}")
+                            
+                            # 章節
+                            chap_keys = list(PHYSICS_CHAPTERS.keys())
+                            try:
+                                chap_idx = chap_keys.index(q.chapter)
+                            except ValueError:
+                                chap_idx = 0
+                            new_chap = ec2.selectbox("章節", chap_keys, index=chap_idx, key=f"e_chap_{original_idx}")
+                            
+                            # 單元 (隨章節連動)
+                            unit_list = PHYSICS_CHAPTERS[new_chap]
+                            try:
+                                unit_idx = unit_list.index(q.unit)
+                            except ValueError:
+                                unit_idx = 0
+                            new_unit = ec3.selectbox("單元", unit_list, index=unit_idx, key=f"e_unit_{original_idx}")
+                            
+                            # 第二列：內容與答案
+                            new_content = st.text_area("題目內容 (支援 LaTeX)", value=q.content, height=150, key=f"e_content_{original_idx}")
+                            
+                            new_options = q.options
+                            if q.type != 'Fill':
+                                opts_text = "\n".join(q.options)
+                                new_opts_text = st.text_area("選項 (每行一個)", value=opts_text, height=100, key=f"e_opts_{original_idx}")
+                                new_options = [line.strip() for line in new_opts_text.split('\n') if line.strip()]
+                                
+                            new_ans = st.text_input("答案", value=q.answer, key=f"e_ans_{original_idx}")
+                            
+                            if st.button("💾 儲存修改", key=f"save_{original_idx}"):
+                                q.source = new_src
+                                q.chapter = new_chap
+                                q.unit = new_unit
+                                q.content = new_content
+                                q.options = new_options
+                                q.answer = new_ans
+                                st.success("修改已儲存！請重新展開此題以查看更新後的標題。")
+                                st.rerun()
+                    else:
+                        # 顯示預覽模式 (原內容)
+                        st.caption(f"分類：{q.chapter} > {q.unit}")
+                        st.markdown("**題目**：")
+                        st.markdown(q.content if q.content else "*(題目內容為空)*")
+                        
+                        if q.image_data:
+                            st.image(q.image_data, caption="題目附圖", width=300)
+                        if q.options:
+                            for idx, opt in enumerate(q.options):
+                                st.text(f"({chr(65+idx)}) {opt}")
+                        st.markdown(f"**答案**：`{q.answer}`")
                     
                     if st.button("🗑️ 刪除此題", key=f"del_{original_idx}"):
                         st.session_state['question_pool'].pop(original_idx)
