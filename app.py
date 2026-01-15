@@ -1,19 +1,23 @@
 import streamlit as st
 import docx
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, Cm
 from docx.oxml.ns import qn
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 import random
 import io
 import re
 
-# 設定頁面資訊
-st.set_page_config(page_title="物理題庫系統 (Physics Exam Generator)", layout="wide", page_icon="🧲")
-
 # ==========================================
-# 常數定義：章節與單元資料
+# 頁面與常數設定
 # ==========================================
+st.set_page_config(
+    page_title="物理題庫自動組卷系統", 
+    layout="wide", 
+    page_icon="🧲"
+)
 
-SOURCES = ["一般試題", "學測題", "北模", "全模", "中模"]
+SOURCES = ["一般試題", "學測題", "分科測驗", "北模", "全模", "中模"]
 
 PHYSICS_CHAPTERS = {
     "第一章.科學的態度與方法": [
@@ -60,19 +64,28 @@ def extract_images_from_paragraph(paragraph, doc_part):
         'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
         'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
     }
-    blips = paragraph._element.findall('.//a:blip', namespaces=nsmap)
-    for blip in blips:
-        embed_attr = blip.get(f"{{{nsmap['r']}}}embed")
-        if embed_attr and embed_attr in doc_part.rels:
-            part = doc_part.rels[embed_attr].target_part
-            if "image" in part.content_type:
-                images.append(part.blob)
+    # 嘗試尋找 blip 元素 (圖片參照)
+    try:
+        blips = paragraph._element.findall('.//a:blip', namespaces=nsmap)
+        for blip in blips:
+            embed_attr = blip.get(f"{{{nsmap['r']}}}embed")
+            if embed_attr and embed_attr in doc_part.rels:
+                part = doc_part.rels[embed_attr].target_part
+                if "image" in part.content_type:
+                    images.append(part.blob)
+    except Exception as e:
+        # 容錯處理
+        print(f"Image extraction warning: {e}")
     return images
 
 def parse_docx(file_bytes):
     """解析 Word 檔案 (支援 Source, Chapter, Unit 標籤)"""
-    doc = docx.Document(io.BytesIO(file_bytes))
-    doc_part = doc.part
+    try:
+        doc = docx.Document(io.BytesIO(file_bytes))
+        doc_part = doc.part
+    except Exception as e:
+        st.error(f"檔案讀取失敗，請確認是否為有效的 Word 檔 (.docx)。錯誤: {e}")
+        return []
     
     questions = []
     current_q = None
@@ -99,7 +112,8 @@ def parse_docx(file_bytes):
         if text.startswith('[Unit:'):
             curr_unit = text.split(':')[1].replace(']', '').strip()
             continue
-        # 相容舊版 [Cat:] 標籤 (視為章節或單元)
+        
+        # 相容舊版 [Cat:] 標籤
         if text.startswith('[Cat:'):
             curr_unit = text.split(':')[1].replace(']', '').strip()
             continue
@@ -182,19 +196,45 @@ def shuffle_options_and_update_answer(question):
         question.source, question.chapter, question.unit
     )
 
-def generate_word_files(selected_questions, shuffle=True):
-    """生成 Word 試卷"""
+def set_font(doc, font_name='Times New Roman', east_asia_font='DFKai-SB'):
+    """設定整份文件的預設字型"""
+    style = doc.styles['Normal']
+    style.font.name = font_name
+    style.font.size = Pt(12)
+    style._element.rPr.rFonts.set(qn('w:eastAsia'), east_asia_font)
+
+def generate_word_files(selected_questions, shuffle=True, title="高中物理科 段考題"):
+    """生成 Word 試卷 (優化排版)"""
     exam_doc = docx.Document()
     ans_doc = docx.Document()
     
-    style = exam_doc.styles['Normal']
-    style.font.name = 'Times New Roman'
-    style.font.size = Pt(12)
+    set_font(exam_doc)
+    set_font(ans_doc)
     
-    exam_doc.add_heading('物理科 試題卷', 0)
-    ans_doc.add_heading('物理科 答案卷', 0)
-    exam_doc.add_paragraph('班級：__________  姓名：__________  座號：__________\n')
+    # === 試題卷檔頭設計 ===
+    # 標題
+    title_p = exam_doc.add_heading(title, 0)
+    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
+    # 建立班級姓名座號表格 (1列4欄)
+    table = exam_doc.add_table(rows=1, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = True
+    
+    # 設定表格內容與寬度
+    cells = table.rows[0].cells
+    cells[0].text = "班級："
+    cells[1].text = "__________"
+    cells[2].text = "姓名："
+    cells[3].text = "__________"
+    
+    exam_doc.add_paragraph("") # 空行分隔
+    
+    # === 答案卷檔頭 ===
+    ans_doc.add_heading(f'{title} - 詳解卷', 0)
+    ans_doc.add_paragraph('此卷包含答案與詳細分類資訊。\n')
+
+    # === 題目內容 ===
     for idx, q in enumerate(selected_questions, 1):
         processed_q = q
         if shuffle and q.type in ['Single', 'Multi']:
@@ -203,21 +243,27 @@ def generate_word_files(selected_questions, shuffle=True):
         # --- 試題卷 ---
         p = exam_doc.add_paragraph()
         q_type_text = {'Single': '單選', 'Multi': '多選', 'Fill': '填充'}.get(q.type, '未知')
+        
+        # 題目文字
         runner = p.add_run(f"{idx}. ({q_type_text}) {processed_q.content.strip()}")
         runner.bold = True
         
+        # 圖片處理
         if processed_q.image_data:
             try:
                 img_stream = io.BytesIO(processed_q.image_data)
-                exam_doc.add_picture(img_stream, width=Inches(3.0))
+                exam_doc.add_picture(img_stream, width=Inches(3.5))
             except Exception as e:
                 print(f"Error adding picture: {e}")
 
+        # 選項處理
         if q.type != 'Fill':
             for i, opt in enumerate(processed_q.options):
                 exam_doc.add_paragraph(f"({chr(65+i)}) {opt}")
         else:
             exam_doc.add_paragraph("______________________")
+        
+        # 題間距
         exam_doc.add_paragraph("") 
         
         # --- 答案卷 ---
@@ -225,7 +271,7 @@ def generate_word_files(selected_questions, shuffle=True):
         ans_p.add_run(f"{idx}. ").bold = True
         ans_p.add_run(f"{processed_q.answer}")
         
-        # 在詳解卷顯示完整分類資訊
+        # 詳解卷資訊
         meta_info = []
         if processed_q.source and processed_q.source != "一般試題": meta_info.append(processed_q.source)
         if processed_q.unit: meta_info.append(processed_q.unit)
@@ -252,8 +298,8 @@ if 'question_pool' not in st.session_state:
 # Streamlit 介面
 # ==========================================
 
-st.title("🧲 物理題庫自動組卷系統 v2.7")
-st.markdown("支援 **完整章節分類**、**學測/模考來源標記** 與 **圖片功能**。")
+st.title("🧲 物理題庫自動組卷系統 v3.1")
+st.markdown("高中物理老師專用助理 | 支援 **LaTeX 公式預覽** 與 **優化排版**。")
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -272,18 +318,23 @@ with st.sidebar:
     - `[Src:學測題]` 來源
     - `[Chap:第一章...]` 章節
     - `[Unit:1-1...]` 單元
-    - `[Type:Single]` 題型
+    - `[Type:Single]` 題型 (Single/Multi/Fill)
+    - `[Q]` 題目開始
+    - `[Opt]` 選項區域
+    - `[Ans] A` 答案
     """)
     
-    sample_doc = docx.Document()
-    sample_doc.add_paragraph("[Src:北模]")
-    sample_doc.add_paragraph("[Chap:第四章.電與磁的統一]")
-    sample_doc.add_paragraph("[Unit:4-1 電流磁效應]")
-    sample_doc.add_paragraph("[Type:Single]\n[Q]\n(範例) 下列關於安培右手定則...\n[Opt]\n(A)選項一\n(B)選項二\n[Ans] A")
-    sample_io = io.BytesIO()
-    sample_doc.save(sample_io)
-    sample_io.seek(0)
-    st.download_button("📥 下載 Word 範本", sample_io, "template.docx")
+    # 產生範本供下載
+    if st.button("📥 下載 Word 匯入範本"):
+        sample_doc = docx.Document()
+        sample_doc.add_paragraph("[Src:北模]")
+        sample_doc.add_paragraph("[Chap:第四章.電與磁的統一]")
+        sample_doc.add_paragraph("[Unit:4-1 電流磁效應]")
+        sample_doc.add_paragraph("[Type:Single]\n[Q]\n(範例) 設載流導線電流為 $I$，距離導線 $r$ 處的磁場強度 $B$ 為何？\n[Opt]\n(A) 正比於 r\n(B) 反比於 r\n[Ans] B")
+        sample_io = io.BytesIO()
+        sample_doc.save(sample_io)
+        sample_io.seek(0)
+        st.download_button("點此下載 .docx 範本", sample_io, "template_v3.docx")
 
 # --- 主畫面 ---
 tab1, tab2, tab3 = st.tabs(["✍️ 手動新增題目", "📁 從 Word 匯入", "🚀 選題與匯出"])
@@ -291,6 +342,7 @@ tab1, tab2, tab3 = st.tabs(["✍️ 手動新增題目", "📁 從 Word 匯入",
 # === Tab 1: 手動輸入 ===
 with tab1:
     st.subheader("新增單一題目")
+    st.caption("提示：在題目內容中使用 `$F=ma$` 語法可顯示數學公式。")
     
     # 第一列：分類設定
     col_cat1, col_cat2, col_cat3 = st.columns(3)
@@ -312,7 +364,13 @@ with tab1:
     with c2:
         new_q_ans = st.text_input("正確答案", placeholder="選擇題填代號(如 A)，填充題填文字")
 
-    new_q_content = st.text_area("題目內容", height=100, placeholder="請輸入題目敘述...")
+    new_q_content = st.text_area("題目內容 (支援 LaTeX)", height=100, placeholder="例如：求物體受力 $F = G \frac{Mm}{r^2}$ 的大小...")
+    
+    # 即時預覽 LaTeX
+    if "$" in new_q_content:
+        st.markdown("**預覽效果：**")
+        st.markdown(new_q_content)
+    
     new_q_image = st.file_uploader("上傳圖片 (選用)", type=['png', 'jpg', 'jpeg'])
     
     new_q_options = []
@@ -343,7 +401,7 @@ with tab1:
 # === Tab 2: Word 匯入 ===
 with tab2:
     st.subheader("批次匯入題目")
-    st.write("支援標籤：`[Src:來源]`, `[Chap:章節]`, `[Unit:單元]`。")
+    st.info("支援標籤：`[Src:來源]`, `[Chap:章節]`, `[Unit:單元]`。")
     uploaded_file = st.file_uploader("上傳 Word (.docx) 檔案", type=['docx'])
     
     if uploaded_file:
@@ -354,7 +412,7 @@ with tab2:
                     st.session_state['question_pool'].extend(imported_qs)
                     st.success(f"成功匯入 {len(imported_qs)} 題！")
                 else:
-                    st.warning("未偵測到題目。")
+                    st.warning("未偵測到題目，請檢查 Word 檔內的標籤格式。")
             except Exception as e:
                 st.error(f"解析失敗：{e}")
 
@@ -363,49 +421,82 @@ with tab3:
     st.subheader("預覽與組卷")
     
     if not st.session_state['question_pool']:
-        st.info("目前題庫是空的。")
+        st.info("目前題庫是空的。請先從 Tab 1 新增或 Tab 2 匯入題目。")
     else:
+        # 過濾器區域
+        st.markdown("### 🔍 篩選題目")
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            filter_chap = st.multiselect("篩選章節", list(PHYSICS_CHAPTERS.keys()))
+        with f_col2:
+            filter_src = st.multiselect("篩選來源", SOURCES)
+
+        # 根據過濾條件顯示題目
+        display_pool = []
+        for i, q in enumerate(st.session_state['question_pool']):
+            # 邏輯：若未選篩選條件則全過，否則需符合條件
+            chap_match = (not filter_chap) or (q.chapter in filter_chap)
+            src_match = (not filter_src) or (q.source in filter_src)
+            
+            if chap_match and src_match:
+                display_pool.append((i, q))
+
+        st.write(f"符合條件：{len(display_pool)} / 總題數：{len(st.session_state['question_pool'])}")
+
         col_ctrl, _ = st.columns([2, 8])
         with col_ctrl:
-            select_all = st.checkbox("全選所有題目", value=True)
+            select_all = st.checkbox("全選符合條件的題目", value=True)
         
-        selected_indices = []
+        selected_final_indices = []
+        
         st.write("---")
         
-        for i, q in enumerate(st.session_state['question_pool']):
+        # 顯示題目列表
+        for original_idx, q in display_pool:
             col_check, col_text = st.columns([0.5, 9.5])
             with col_check:
-                is_checked = st.checkbox("選取", value=select_all, key=f"sel_{i}", label_visibility="collapsed")
+                is_checked = st.checkbox("選", value=select_all, key=f"sel_{original_idx}", label_visibility="collapsed")
                 if is_checked:
-                    selected_indices.append(i)
+                    selected_final_indices.append(original_idx)
             
             with col_text:
-                type_badge = {'Single': '🟢單選', 'Multi': '🔵多選', 'Fill': '🟠填充'}.get(q.type)
-                # 顯示詳細分類標籤
+                type_badge = {'Single': '🟢單選', 'Multi': '🔵多選', 'Fill': '🟠填充'}.get(q.type, '⚪未知')
                 tags = f"[{q.source}] {q.unit}"
-                with st.expander(f"{i+1}. {tags} {type_badge} {q.content.splitlines()[0][:30]}..."):
-                    st.caption(f"完整分類：{q.chapter} > {q.unit}")
-                    st.markdown(f"**題目**：\n{q.content}")
+                
+                # 預覽區塊
+                with st.expander(f"{original_idx+1}. {tags} | {type_badge} | {q.content.splitlines()[0][:20]}..."):
+                    st.caption(f"分類：{q.chapter} > {q.unit}")
+                    
+                    # 支援 LaTeX 顯示
+                    st.markdown("**題目**：")
+                    st.markdown(q.content)
+                    
                     if q.image_data:
                         st.image(q.image_data, caption="題目附圖", width=300)
                     if q.options:
                         for idx, opt in enumerate(q.options):
                             st.text(f"({chr(65+idx)}) {opt}")
                     st.markdown(f"**答案**：`{q.answer}`")
-                    if st.button("🗑️ 刪除", key=f"del_{i}"):
-                        st.session_state['question_pool'].pop(i)
+                    
+                    if st.button("🗑️ 刪除此題", key=f"del_{original_idx}"):
+                        st.session_state['question_pool'].pop(original_idx)
                         st.rerun()
 
         st.divider()
-        st.write(f"已選擇: **{len(selected_indices)}** 題")
-        do_shuffle = st.checkbox("啟用選項亂數重排", value=True)
+        st.write(f"已勾選匯出: **{len(selected_final_indices)}** 題")
         
-        if st.button("🚀 生成 Word 試卷", type="primary", disabled=len(selected_indices)==0):
-            final_qs = [st.session_state['question_pool'][i] for i in selected_indices]
-            exam_file, ans_file = generate_word_files(final_qs, shuffle=do_shuffle)
+        col_set1, col_set2 = st.columns(2)
+        with col_set1:
+            exam_title_input = st.text_input("試卷標題", value="高中物理科 段考題")
+        with col_set2:
+            do_shuffle = st.checkbox("啟用選項亂數重排", value=True)
+        
+        if st.button("🚀 生成 Word 試卷", type="primary", disabled=len(selected_final_indices)==0):
+            final_qs = [st.session_state['question_pool'][i] for i in selected_final_indices]
+            exam_file, ans_file = generate_word_files(final_qs, shuffle=do_shuffle, title=exam_title_input)
             
             col_d1, col_d2 = st.columns(2)
             with col_d1:
-                st.download_button("📄 下載試題卷", exam_file, "物理試題卷.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                st.download_button("📄 下載試題卷 (Word)", exam_file, "物理試題卷.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             with col_d2:
-                st.download_button("🔑 下載詳解卷", ans_file, "物理詳解卷.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                st.download_button("🔑 下載詳解卷 (Word)", ans_file, "物理詳解卷.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
